@@ -41,23 +41,44 @@ jobs:
           docker compose up --detach --build
       - name: Check HTTP, Prometheus and Grafana
         run: |
+          assert_status() {
+            local expected="$1"
+            local url="$2"
+            local actual
+            actual="$(curl -sS -o /dev/null -w '%{http_code}' "$url")"
+            echo "$url -> HTTP $actual"
+            [[ "$actual" == "$expected" ]]
+          }
+
           for attempt in {1..30}; do
             curl -fsS http://127.0.0.1:8000/metrics >/dev/null && break
             sleep 2
           done
-          curl -fsS http://127.0.0.1:8000/
-          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/not-found)" = 404
-          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/error)" = 503
+          assert_status 200 http://127.0.0.1:8000/
+          assert_status 404 http://127.0.0.1:8000/not-found
+          assert_status 503 http://127.0.0.1:8000/error
+
           for attempt in {1..30}; do
             curl -fsS http://127.0.0.1:9090/-/ready >/dev/null && break
             sleep 2
           done
-          curl -fsS 'http://127.0.0.1:9090/api/v1/query?query=up%7Bjob%3D%22python-app%22%7D' | grep -q '"1"'
+          prometheus_result=""
           for attempt in {1..30}; do
-            curl -fsS -u admin:grafana-demo http://127.0.0.1:3000/api/health >/dev/null && break
+            prometheus_result="$(curl -fsS 'http://127.0.0.1:9090/api/v1/query?query=up%7Bjob%3D%22python-app%22%7D' || true)"
+            [[ "$prometheus_result" == *'"1"'* ]] && break
             sleep 2
           done
-          curl -fsS -u admin:grafana-demo http://127.0.0.1:3000/api/datasources/uid/prometheus/health | grep -q '"status":"OK"'
+          echo "Prometheus up query: $prometheus_result"
+          [[ "$prometheus_result" == *'"1"'* ]]
+
+          grafana_health=""
+          for attempt in {1..30}; do
+            grafana_health="$(curl -fsS -u admin:grafana-demo http://127.0.0.1:3000/api/datasources/uid/prometheus/health || true)"
+            [[ "$grafana_health" == *'"status":"OK"'* ]] && break
+            sleep 2
+          done
+          echo "Grafana data source health: $grafana_health"
+          [[ "$grafana_health" == *'"status":"OK"'* ]]
       - name: Show logs after failure
         if: failure()
         run: docker compose logs --no-color
